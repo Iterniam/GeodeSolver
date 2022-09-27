@@ -1,4 +1,4 @@
-from typing import Callable, Iterator
+from typing import Callable
 
 from src.Enums.geode_enum import GeodeEnum
 from src.Utils.collections.queue_extensions import PrioritySet
@@ -12,22 +12,35 @@ class Geode:
 
     def __init__(self, geode_grid: list[list[GeodeEnum]]):
         self.grid: list[list[Cell]] = geode_grid
+        self.cells: set[Cell] = {self.grid[row][col]
+                                 for row in range(len(self.grid))
+                                 for col in range(len(self.grid[0]))}
+        self.__init_neighbours__()
         self.groups: dict[int, Group] = {}
         self.clusters: set[frozenset[Cell]] = set()
         self.populate_bridges()
 
+    def __init_neighbours__(self):
+        for cell in self.cells:
+            row_len = len(self.grid)
+            col_len = len(self.grid[0])
+
+            cell.neighbours = [self.grid[cell.row + row_][cell.col + col_]
+                               for row_, col_ in [(-1, 0), (0, -1), (1, 0), (0, 1)]
+                               if 0 <= cell.row + row_ < row_len and 0 <= cell.col + col_ < col_len]
+
     def populate_bridges(self):
         # Replace air blocks that connect to at least two pumpkins with a bridge
-        for cell in self.cells():
+        for cell in self.cells:
             if (cell.projected_block == GeodeEnum.AIR and
                 sum((1
-                     for neighbour in cell.neighbours(self.grid)
+                     for neighbour in cell.neighbours
                      if neighbour.projected_block == GeodeEnum.PUMPKIN)) >= 2):
                 cell.projected_block = GeodeEnum.BRIDGE
 
     def reset_groups(self):
         # Reset groups
-        for block in self.cells():
+        for block in self.cells:
             block.group_nr = -1
         self.groups.clear()
 
@@ -36,7 +49,7 @@ class Geode:
         # If every pumpkin can reach every pumpkin, then there's only one cluster
         # If there's also a 1x1 group that can't reach any other pumpkin, then there are two, etc.
         # Each cluster has at least one pumpkin
-        undiscovered_pumpkins = set(cell for cell in self.cells()
+        undiscovered_pumpkins = set(cell for cell in self.cells
                                     if cell.projected_block == GeodeEnum.PUMPKIN and not cell.has_group)
 
         clusters = set()
@@ -53,7 +66,7 @@ class Geode:
                 # BFS
                 current_cells = {cell
                                  for edge in current_cells
-                                 for cell in edge.neighbours(self.grid)
+                                 for cell in edge.neighbours
                                  if cell not in visited_cells
                                  and cell.projected_block in [GeodeEnum.PUMPKIN, GeodeEnum.BRIDGE]
                                  and not cell.has_group}
@@ -73,11 +86,11 @@ class Geode:
             extended_frontier = {neighbour
                                  for cell in frontier
                                  if cell.projected_block == GeodeEnum.BRIDGE
-                                 for neighbour in cell.neighbours(self.grid)
+                                 for neighbour in cell.neighbours
                                  if neighbour.projected_block in [GeodeEnum.PUMPKIN] and not neighbour.has_group}
             cells = frontier | extended_frontier
         else:
-            cells = set(self.cells())
+            cells = set(self.cells)
 
         for cell in cells:
             if cell.projected_block in [GeodeEnum.OBSIDIAN, GeodeEnum.AIR] or cell.has_group:
@@ -103,7 +116,7 @@ class Geode:
 
                 new_cells = {cell
                              for edge in current_cells
-                             for cell in edge.neighbours(self.grid)
+                             for cell in edge.neighbours
                              if cell not in visited_cells
                              and cell.projected_block not in [GeodeEnum.OBSIDIAN, GeodeEnum.AIR]
                              and not cell.has_group}
@@ -151,7 +164,7 @@ class Geode:
             # To add the cluster, we create frontier, i.e. the set of neighbours of the current group.
             frontier = {neighbour
                         for group_block in group.cells
-                        for neighbour in group_block.neighbours(self.grid)
+                        for neighbour in group_block.neighbours
                         if neighbour not in group.cells}
             # We compute the set of blocks that should be absorbed
             absorption_target_set = {block
@@ -237,13 +250,13 @@ class Geode:
                 # of the current group, so we should only add blocks to the queue that are both in the frontier and in
                 # the set of blocks that is to be absorbed
                 for cell in frontier & absorption_target_set:
-                    q.add(cell, cell.priority(self.grid))
+                    q.add(cell, cell.priority)
             else:
                 # absorb_cluster_mode_enabled is inactive, we need to recompute the isolation metric for the
                 # frontier, then add the blocks to the queue
                 self.average_isolation(frontier)
                 for cell in frontier:
-                    q.add(cell, cell.priority(self.grid))
+                    q.add(cell, cell.priority)
 
             try:  # Select the cell for this iteration
                 cell: Cell = q.get()
@@ -260,7 +273,7 @@ class Geode:
             if (cell.projected_block == GeodeEnum.BRIDGE
                     and not any((not neighbour.has_group
                                  and neighbour.projected_block in [GeodeEnum.PUMPKIN, GeodeEnum.BRIDGE]
-                                 for neighbour in cell.neighbours(self.grid)))):
+                                 for neighbour in cell.neighbours))):
                 visited_blocks.add(cell)
                 frontier.remove(cell)
                 continue
@@ -287,7 +300,7 @@ class Geode:
 
             if commit_block:
                 # We add new neighbours to the frontier
-                frontier |= {neighbour for neighbour in cell.neighbours(self.grid)
+                frontier |= {neighbour for neighbour in cell.neighbours
                              if neighbour.projected_block in [GeodeEnum.PUMPKIN, GeodeEnum.BRIDGE]
                              and not neighbour.has_group
                              and neighbour not in visited_blocks}
@@ -296,16 +309,16 @@ class Geode:
         self.reset_groups()
 
         while any(not block.has_group
-                  for block in self.cells()
+                  for block in self.cells
                   if block.projected_block == GeodeEnum.PUMPKIN):
             # Before populating a new group, we should always update the isolation score for all blocks
             # and compute clusters
             self.average_isolation()
             self.compute_clusters()
 
-            source_block = min((block for block in self.cells()
+            source_block = min((block for block in self.cells
                                 if block.projected_block == GeodeEnum.PUMPKIN and not block.has_group),
-                               key=lambda x: x.priority(self.grid))
+                               key=lambda x: x.priority)
             frontier = {source_block}
             visited_blocks = set()
             # Instantiate the group (looks weird because of default dicts)
@@ -315,14 +328,9 @@ class Geode:
 
             self.populate_group(group, frontier, visited_blocks)
 
-    def cells(self) -> Iterator[Cell]:
-        return (self.grid[row][col]
-                for row in range(len(self.grid))
-                for col in range(len(self.grid[0])))
-
     def isolated_pumpkins(self) -> list[Cell]:
         return [cell
-                for cell in self.cells()
+                for cell in self.cells
                 if cell.average_block_distance >= 50
                 and cell.projected_block == GeodeEnum.PUMPKIN]
 

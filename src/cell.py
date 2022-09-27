@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import Union, Callable
+from typing import Union
 
 from src.Enums.geode_enum import GeodeEnum
 
@@ -22,14 +22,7 @@ class Cell:
         self.shortest_path_dict: dict[Cell, Union[int, float]] = defaultdict(lambda: float('inf'))
         self.average_block_distance: float = float('inf')
         self.reachable_pumpkins: int = 0
-
-    def neighbours(self, grid: list[list[Cell]]):
-        row_len = len(grid)
-        col_len = len(grid[0])
-
-        return [grid[self.row + row_][self.col + col_]
-                for row_, col_ in [(-1, 0), (0, -1), (1, 0), (0, 1)]
-                if 0 <= self.row + row_ < row_len and 0 <= self.col + col_ < col_len]
+        self.neighbours: set[Cell] = set()
 
     def projected_str(self) -> str:
         return self.projected_block.pretty_print
@@ -61,7 +54,8 @@ class Cell:
     def has_group(self):
         return self.group_nr != -1
 
-    def priority(self, grid: list[list[Cell]]) -> tuple[Union[int, float], Cell]:
+    @property
+    def priority(self) -> tuple[Union[int, float], Cell]:
         # The priority is a tuple with cell such that given the same score, pumpkins can be given priority over
         # bridges and air
         if self.projected_block == GeodeEnum.PUMPKIN:
@@ -69,7 +63,7 @@ class Cell:
 
         # Otherwise, return the maximum isolation score of all the neighbours
         return -max((neighbour.average_block_distance
-                     for neighbour in self.neighbours(grid)
+                     for neighbour in self.neighbours
                      if neighbour.projected_block == GeodeEnum.PUMPKIN
                      and not neighbour.has_group),
                     default=self.average_block_distance), self
