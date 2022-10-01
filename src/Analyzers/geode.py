@@ -294,9 +294,11 @@ class Geode:
                 if len(self.clusters) > len(old_clusters):
                     commit_block = self.handle_cluster_splitting(cell, group, old_clusters,
                                                                  self.clusters, visited_blocks)
-                    # Regardless of whether the block was committed and more blocks were added, or if the block
-                    # is rolled back, we need to recompute the cluster so the next run has accurate clusters
-                    self.compute_clusters()
+                    # If the block is rolled back, we also roll back the clusters
+                    if commit_block:
+                        self.compute_clusters()
+                    else:  # If a cluster is added, we recompute the clusters so the next run is accurate.
+                        self.clusters = old_clusters
 
             if commit_block:
                 # We add new neighbours to the frontier
