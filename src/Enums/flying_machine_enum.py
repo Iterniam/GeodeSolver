@@ -1,13 +1,8 @@
-from __future__ import annotations
 from enum import Enum
 from types import MappingProxyType
 
+from src.Enums.axis_enum import Axis
 from src.Enums.data_annotations import DataPrimitive
-
-
-class Axis(Enum):
-    Horizontal = 0,
-    Vertical = 1,
 
 
 class _FlyingMachineDP(DataPrimitive):
