@@ -59,7 +59,6 @@ class FlyingMachineEnum(Enum):
     @_FlyingMachineDP
     def __new__(cls,
                 name: str,
-                *,
                 axes: list[Axis],
                 uses_qc: bool,
                 tileable: bool,
