@@ -1,8 +1,12 @@
-from typing import Callable
+from typing import Callable, Optional, Iterable
 
+import colorama
+
+from src.Enums.flying_machine_enum import FlyingMachineEnum
 from src.Enums.geode_enum import GeodeEnum
 from src.Utils.collections.queue_extensions import PrioritySet
 from src.cell import Cell
+from src.flying_machine import FlyingMachine
 from src.group import Group
 
 MAX_GROUP_SIZE = 12
@@ -18,6 +22,7 @@ class Geode:
         self.__init_neighbours__()
         self.groups: dict[int, Group] = {}
         self.clusters: set[frozenset[Cell]] = set()
+        self.flying_machines: set[FlyingMachine] = set()
         self.populate_bridges()
 
     def __init_neighbours__(self):
@@ -33,9 +38,9 @@ class Geode:
         # Replace air blocks that connect to at least two pumpkins with a bridge
         for cell in self.cells:
             if (cell.projected_block == GeodeEnum.AIR and
-                sum((1
-                     for neighbour in cell.neighbours
-                     if neighbour.projected_block == GeodeEnum.PUMPKIN)) >= 2):
+                    sum((1
+                         for neighbour in cell.neighbours
+                         if neighbour.projected_block == GeodeEnum.PUMPKIN)) >= 2):
                 cell.projected_block = GeodeEnum.BRIDGE
 
     def reset_groups(self):
@@ -44,13 +49,15 @@ class Geode:
             block.group_nr = -1
         self.groups.clear()
 
-    def compute_clusters(self):
+    def compute_clusters(self, condition: Callable = None) -> set[frozenset[Cell]]:
         # Returns a list of the clusters of pumpkins that already can naturally reach each other.
         # If every pumpkin can reach every pumpkin, then there's only one cluster
         # If there's also a 1x1 group that can't reach any other pumpkin, then there are two, etc.
         # Each cluster has at least one pumpkin
+        if condition is None:
+            condition = lambda cell: not cell.has_group
         undiscovered_pumpkins = set(cell for cell in self.cells
-                                    if cell.projected_block == GeodeEnum.PUMPKIN and not cell.has_group)
+                                    if cell.projected_block == GeodeEnum.PUMPKIN and condition(cell))
 
         clusters = set()
 
@@ -69,10 +76,10 @@ class Geode:
                                  for cell in edge.neighbours
                                  if cell not in visited_cells
                                  and cell.projected_block in [GeodeEnum.PUMPKIN, GeodeEnum.BRIDGE]
-                                 and not cell.has_group}
+                                 and condition(cell)}
             undiscovered_pumpkins -= visited_cells
             clusters.add(frozenset(visited_cells))
-        self.clusters = clusters
+        return clusters
 
     def average_isolation(self, frontier: set[Cell] = None):
         """
@@ -290,13 +297,13 @@ class Geode:
             if not absorb_cluster_mode_enabled:
                 # Store the old clusters before we recompute them
                 old_clusters = self.clusters
-                self.compute_clusters()
+                self.clusters = self.compute_clusters()
                 if len(self.clusters) > len(old_clusters):
                     commit_block = self.handle_cluster_splitting(cell, group, old_clusters,
                                                                  self.clusters, visited_blocks)
                     # If the block is rolled back, we also roll back the clusters
                     if commit_block:
-                        self.compute_clusters()
+                        self.clusters = self.compute_clusters()
                     else:  # If a cluster is added, we recompute the clusters so the next run is accurate.
                         self.clusters = old_clusters
 
@@ -310,36 +317,133 @@ class Geode:
     def heuristic_placement(self):
         self.reset_groups()
 
+        next_source_block = None
         while any(not block.has_group
                   for block in self.cells
                   if block.projected_block == GeodeEnum.PUMPKIN):
             # Before populating a new group, we should always update the isolation score for all blocks
             # and compute clusters
             self.average_isolation()
-            self.compute_clusters()
+            self.clusters = self.compute_clusters()
 
-            source_block = min((block for block in self.cells
-                                if block.projected_block == GeodeEnum.PUMPKIN and not block.has_group),
-                               key=lambda x: x.priority)
+            if next_source_block:
+                source_block = next_source_block
+            else:
+                source_block = min((block for block in self.cells
+                                    if block.projected_block == GeodeEnum.PUMPKIN and not block.has_group),
+                                   key=lambda x: x.priority)
             frontier = {source_block}
             visited_blocks = set()
             # Instantiate the group (looks weird because of default dicts)
             group = Group()
             group.group_nr = len(self.groups)
             self.groups[group.group_nr] = group
-
             self.populate_group(group, frontier, visited_blocks)
 
-    def isolated_pumpkins(self) -> list[Cell]:
-        return [cell
-                for cell in self.cells
-                if cell.average_block_distance >= 50
-                and cell.projected_block == GeodeEnum.PUMPKIN]
+            self.pretty_print_merged()
+
+            # We only place machines for 'clean' first groups
+            if next_source_block is None:
+                placed, next_source_block, flying_machine = self.place_double_pusher(group)
+            else:
+                flying_machine.pu
+                for cell in flying_machine.complete_footprint:
+                    group.add_cell(cell)
+                next_source_block = None
+
+    def place_double_pusher(self, group: Group) -> tuple[bool, Optional[Cell], Optional[FlyingMachine]]:
+        # Get all possible double pushers that can push this group
+        machine_types = [FlyingMachineEnum.LINE_SHAPE_DOUBLE_PUSHER, FlyingMachineEnum.L_SHAPE_DOUBLE_PUSHER]
+        flying_machines: set[FlyingMachine] = {
+            machine
+            for machine_type in machine_types
+            for machine in self.generate_valid_flying_machines(group, machine_type)}
+
+        # self._pretty_print_debug_mark_cells((machine_.origin
+        #                                     for machine_ in flying_machines))
+        # self.pretty_print_average_distance()
+
+        # Now that we have all possible flying machine locations, we want to rate them and select the best one
+        best_score = 0
+        best_machine = None
+        best_ungrouped_pusher = None
+        for machine in flying_machines:
+            ungrouped_pusher = next(next(iter(pushing_cells))
+                                    for pushing_cells in machine.pushed_cells.values()
+                                    if len(pushing_cells) == 1)
+            if (ungrouped_pusher.projected_block not in [GeodeEnum.OBSIDIAN, GeodeEnum.AIR, GeodeEnum.BRIDGE]
+                    and ungrouped_pusher.average_block_distance > best_score):
+                best_score = ungrouped_pusher.average_block_distance
+                best_machine = machine
+                best_ungrouped_pusher = ungrouped_pusher
+
+        if best_machine is not None:
+            self.flying_machines.add(best_machine)
+            for cell in best_machine.complete_footprint:
+                group.add_cell(cell)
+            return True, best_ungrouped_pusher, best_machine
+        return False, None, None
+
+    def generate_valid_flying_machines(self, group: Group, machine: FlyingMachineEnum) -> set[FlyingMachine]:
+        # TODO: eventually, add support for rotating for non-QC machines
+        # Find all locations where a flying machine would intersect with at least one block of the group
+        # The check is based only on the grid size of the footprint - not on the footprint cell values
+        footprint_nr_of_rows = len(machine.engine_footprint)
+        footprint_nr_of_cols = len(machine.engine_footprint[0])
+        mirrors = ([False] if footprint_nr_of_cols == 1 else [True, False])  # Cull search space for 1-wide machines
+        grid_nr_of_rows = len(self.grid)
+        grid_nr_of_cols = len(self.grid[0])
+        # noinspection PyUnboundLocalVariable col
+        all_origins = {
+            (self.grid[row][col], mirrored)
+            for mirrored in mirrors
+            for cell in group.cells
+            for row_offset in range(footprint_nr_of_rows)
+            for col_offset in range(footprint_nr_of_cols)
+            if 0 <= (row := cell.row - row_offset) < grid_nr_of_rows
+            and 0 <= (col := cell.col + (col_offset if mirrored else -col_offset)) < grid_nr_of_cols
+        }
+
+        # From these locations, create flying machines if the machine can actually fit there
+        return {flying_machine
+                for cell, mirrored in all_origins
+                if (flying_machine := FlyingMachine.try_place_machine(machine, self, cell, group,
+                                                                      mirrored=mirrored)) is not None}
+
+
+    def populate_flying_machines(self, valid_flying_machines: set[FlyingMachineEnum]):
+        for group in self.groups:
+            # The entire group must be covered
+            # Up to 6 attachements on one side
+            # Up to 2 attachments on the other side
+
+            # Approach one:
+            # Fit an engine somewhere
+            # 'see' if the engine + attached blocks can consume the entire group
+            # How?
+
+            # Approach two:
+            # Prune a block
+            # Check if the rest of the blocks are still reachable
+            # If so, prune an adjacent block in the group and perform the same check
+            # Repeat this process until the desired number of attached blocks are pruned
+            # Prune an engine block - the engine block is what the blocks are attached to
+            # For all directions in which the machine can fit with that part of the flying machine locked
+            #    Check if all remaining blocks can be reached by the part that can be attached on that flying machine
+            # If any such configuration is found, it is valid
+            pass
+        # self.flying_machines.add(FlyingMachine(FlyingMachineEnum.MANGO_MACHINE, self.grid, self.grid[0][0],
+        #                                        mirrored=False))
 
     def _pretty_print_grid(self, str_func: Callable[[Cell], str]):
         for row_val in self.grid:
-            print(''.join((str_func(cell))
+            print(''.join(str_func(cell)
                           for cell in row_val))
+
+    def _pretty_print_debug_mark_cells(self, cells: Iterable[Cell]):
+        cells = set(cells)
+        self._pretty_print_grid(lambda cell: f'{colorama.Back.RED}  {colorama.Back.RESET}'
+                                             if cell in cells else cell.projected_str())
 
     def pretty_print_group_grid(self):
         self._pretty_print_grid(Cell.group_str)
@@ -352,6 +456,9 @@ class Geode:
 
     def pretty_print_shortest_distance(self, cell: Cell):
         self._pretty_print_grid(lambda cell2: cell.distance_str(cell2))
+
+    def pretty_print_machine_str(self):
+        self._pretty_print_grid(lambda cell: cell.machine_str(self.flying_machines))
 
     def pretty_print_average_distance(self):
         self._pretty_print_grid(Cell.isolation_str)

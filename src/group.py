@@ -1,4 +1,9 @@
-from src.cell import Cell
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from src.cell import Cell
 
 
 class Group:

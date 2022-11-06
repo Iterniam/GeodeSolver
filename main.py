@@ -1,5 +1,6 @@
 import time
 
+from src.Enums.flying_machine_enum import FlyingMachineEnum
 from src.Enums.geode_enum import GeodeEnum
 from src.grid_reader import geode_generator
 import colorama
@@ -37,12 +38,17 @@ input_grid = '''00000000000000000
 gen = geode_generator()
 for i, geode in enumerate(gen):
     start = time.time()  # Doesn't include geode instantiation but that should be negligible
+    geode.pretty_print_merged()
     geode.heuristic_placement()
     print(f'Geode {i} took {(time.time() - start):3.2f} seconds')
     print('Group sizes:')
     print('\n'.join((f'{group.group_nr:02}: {len(group.cells)}' for group in geode.groups.values())))
+    geode.pretty_print_merged()
     # geode.pretty_print_projection()
     # geode.pretty_print_group_grid()
     # geode.pretty_print_merged()
     # geode.populate_bridges()
-    geode.pretty_print_merged()
+    print('Placing flying machines')
+    geode.populate_flying_machines({FlyingMachineEnum.MANGO_MACHINE})
+    geode.pretty_print_machine_str()
+        # exit()

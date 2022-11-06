@@ -107,9 +107,12 @@ class FlyingMachineEnum(Enum):
         tileable=True,
         length=8,
         trigger_delay=0,
-        engine_footprint=[[True, True]],
-        attached_blocks_footprints={1: [[Range(0, 5), Range(0, 1)]],
-                                    2: [[Range(0, 0), Range(5, 8)]]},
+        engine_footprint=[[True],
+                          [True]],
+        attached_blocks_footprints={1: [[Range(0, 5)],
+                                        [Range(0, 1)]],
+                                    2: [[Range(0, 0)],
+                                        [Range(5, 8)]]},
         attached_blocks={1: 2, 2: 6},
     )
     L_SHAPE_DOUBLE_PUSHER = _FlyingMachineDP.new(
