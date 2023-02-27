@@ -17,7 +17,7 @@ class PlaneEnum(Enum):
     y = 'Y',
     z = 'Z',
 
-    def to_coord_2d(self, x: int, y: int, z: int):
+    def to_coord_2d(self, x: int, y: int, z: int) -> tuple[int, int]:
         match self:
             case PlaneEnum.x:
                 return y, z
@@ -26,14 +26,43 @@ class PlaneEnum(Enum):
             case PlaneEnum.z:
                 return x, y
 
-    def to_slice_coord(self, x: int, y: int, z: int):
-        return (self,) + self.to_coord_2d(x, y, z)
+    def to_slice(self, x: int, y: int, z: int) -> Slice:
+        return Slice(self, *self.to_coord_2d(x, y, z))
 
 
-def slice_neighbours(slice_coord: tuple[PlaneEnum, int, int]) -> list[tuple[PlaneEnum, int, int]]:
-    plane, a, b = slice_coord
-    return list((plane, a + offset_a, b + offset_b)
-                for offset_a, offset_b in [(0, 1), (1, 0), (0, -1), (-1, 0)])
+class Slice:
+    def __init__(self, plane: PlaneEnum, coord_a: int, coord_b: int):
+        self.plane = plane
+        self.coord_a = coord_a
+        self.coord_b = coord_b
+        self.sat_bool = Bool(f'slice__{self.plane}__{self.coord_a}__{self.coord_b}')
+
+    def add(self, coord_a: int, coord_b: int) -> Slice:
+        return Slice(self.plane, self.coord_a + coord_a, self.coord_b + coord_b)
+
+    def to_slice_coord(self) -> tuple[PlaneEnum, int, int]:
+        return self.plane, self.coord_a, self.coord_b
+
+    def to_coord_3d(self, plane_coord: int) -> tuple[int, int, int]:
+        match self.plane:
+            case PlaneEnum.x:
+                return plane_coord, self.coord_a, self.coord_b
+            case PlaneEnum.y:
+                return self.coord_a, plane_coord, self.coord_b
+            case PlaneEnum.z:
+                return self.coord_a, self.coord_b, plane_coord
+
+    def __eq__(self, other):
+        if isinstance(other, Slice):
+            return vars(self) == vars(other)
+        return False
+
+    def __hash__(self):
+        return hash(tuple(vars(self).values()))
+
+    def neighbours(self) -> list[Slice]:
+        return [self.add(offset_a, offset_b)
+                for offset_a, offset_b in [(0, 1), (1, 0), (0, -1), (-1, 0)]]
 
 
 def neighbours_3d(coordinate: tuple[int, int, int]) -> list[tuple[int, int, int]]:
@@ -93,21 +122,18 @@ amethyst_clusters_dict: dict[tuple[int, int, int], BoolRef] = {
 amethyst_clusters_d: list[BoolRef] = list(amethyst_clusters_dict.values())
 
 # To make constraints about budding amethysts, amethyst clusters, and slices, we need to create dictionaries first
-slice_coord_to_harvesting_coords_dict: dict[tuple[PlaneEnum, int, int], set[tuple[int, int, int]]] = defaultdict(set)
-harvesting_coords_to_slice_coords_dict: dict[tuple[int, int, int], set[tuple[PlaneEnum, int, int]]] = defaultdict(set)
+slice_coord_to_harvesting_coords_dict: dict[Slice, set[tuple[int, int, int]]] = defaultdict(set)
+harvesting_coords_to_slice_coords_dict: dict[tuple[int, int, int], set[Slice]] = defaultdict(set)
 for plane in PlaneEnum:
     for x, y, z in amethyst_clusters | budding_amethysts:
-        coord_2d = plane.to_slice_coord(x, y, z)
-        slice_coord_to_harvesting_coords_dict[coord_2d].add((x, y, z))
-        harvesting_coords_to_slice_coords_dict[(x, y, z)].add(coord_2d)
+        slice_ = plane.to_slice(x, y, z)
+        slice_coord_to_harvesting_coords_dict[slice_].add((x, y, z))
+        harvesting_coords_to_slice_coords_dict[(x, y, z)].add(slice_)
 # Define slices
-slices_dict: dict[tuple[PlaneEnum, int, int], BoolRef] = {
-    (plane, a, b): Bool(f'slice__{plane}__{a}__{b}')
-    for plane, a, b in slice_coord_to_harvesting_coords_dict.keys()}
+slices = list(slice_coord_to_harvesting_coords_dict.keys())
 cluster_harvest_dict: dict[tuple[int, int, int], list[BoolRef]] = {
-    coord_3d: [slices_dict[coord_2d] for coord_2d in harvesting_coords_to_slice_coords_dict[coord_3d]]
+    coord_3d: [slice_.sat_bool for slice_ in harvesting_coords_to_slice_coords_dict[coord_3d]]
     for coord_3d in budding_amethysts | amethyst_clusters}
-slices_d: list[BoolRef] = list(slices_dict.values())
 
 ########################################################################################################
 # Set relations between amethyst clusters and budding amethysts                                        #
@@ -153,22 +179,23 @@ bud_xor_cluster_c = [Xor(budding_amethysts_dict[coord], amethyst_clusters_dict[c
 # Set relations between slices and budding amethysts:
 # When a slice is active, the budding amethysts that intersect with it are inactive
 slice_implies_not_bud_c = [
-    Implies(slices_dict[slice_coords], Not(budding_amethysts_dict[coord_3d]))
-    for coord_3d, slices_coords in harvesting_coords_to_slice_coords_dict.items() if coord_3d in budding_amethysts
-    for slice_coords in slices_coords]
+    Implies(slice_.sat_bool, Not(budding_amethysts_dict[coord_3d]))
+    for coord_3d, slices in harvesting_coords_to_slice_coords_dict.items() if coord_3d in budding_amethysts
+    for slice_ in slices]
 
 # When a budding amethyst is active, no slice that could harvest it is active
 bud_implies_not_slices_c = [
-    Implies(budding_amethysts_dict[coord_3d], Not(slices_dict[slice_coords]))
-    for coord_3d, slices_coords in harvesting_coords_to_slice_coords_dict.items() if coord_3d in budding_amethysts
-    for slice_coords in slices_coords]
+    Implies(budding_amethysts_dict[coord_3d], Not(slice_.sat_bool))
+    for coord_3d, slices in harvesting_coords_to_slice_coords_dict.items() if coord_3d in budding_amethysts
+    for slice_ in slices]
 
 # Build up required structures for relations between 1x1 holes:
 # Identify projections that could be 1x1 holes
-potential_one_by_one_holes: set[tuple[PlaneEnum, int, int]] = {
+potential_one_by_one_holes: set[Slice] = {
     slice_
-    for slice_ in slices_dict.keys()
-    if all(neighbour in slices_dict for neighbour in slice_neighbours(slice_))}
+    for slice_ in slices
+    if all(neighbour in slices 
+           for neighbour in slice_.neighbours())}
 
 # Map the holes to a set of up to three projections that must be active to make it possible to power it
 # The following holes allow for the projection to be active
@@ -178,36 +205,36 @@ potential_one_by_one_holes: set[tuple[PlaneEnum, int, int]] = {
 #    #H#
 #     #
 # Where # is blocked, H is the hole, and A, B, or C has to be free
-potential_holes_to_list_of_sets_of_required_projections: dict[tuple[PlaneEnum, int, int], list[set[BoolRef]]] = {}
-for plane, a, b in potential_one_by_one_holes:
-    if plane == PlaneEnum.y:
+potential_holes_to_list_of_sets_of_required_projections: dict[Slice, list[set[BoolRef]]] = {}
+for slice_ in potential_one_by_one_holes:
+    if slice_.plane == PlaneEnum.y:
         continue
-    potential_holes_to_list_of_sets_of_required_projections[(plane, a, b)] = [
-         {slices_dict[offset_coord]
+    potential_holes_to_list_of_sets_of_required_projections[slice_] = [
+         {offset_slice.sat_bool
           for offset_a, offset_b in offset_coords
-          if (offset_coord := (plane, a + offset_a, b + offset_b)) in slice_coord_to_harvesting_coords_dict.keys()}
+          if (offset_slice := slice_.add(offset_a, offset_b)) in slices}
          for offset_coords in [{(-2, 1), (-1, 1)}, {(0, 2), (0, 3)}, {(1, 1), (1, 2)}]]
 
 # Set 1x1 hole prevention for the vertical (y) plane:
 # A potential hole being active implies that at least one of its neighbours is also active,
 # because then it's not a 1x1 hole but at least 2x1.
 block_vertical_one_by_one_holes_c = [
-    Implies(slices_dict[(plane, a, b)],                                     # A potential hole implies
-            Or([slices_dict[neighbour]                                      # that at least one neighbour
-                for neighbour in slice_neighbours((plane, a, b))]))         # is active
-    for plane, a, b in potential_one_by_one_holes if plane == PlaneEnum.y]  # if the hole is vertical
+    Implies(slice_.sat_bool,                                                  # A potential hole implies
+            Or([neighbour.sat_bool                                            # that at least one neighbour
+                for neighbour in slice_.neighbours()]))                       # is active
+    for slice_ in potential_one_by_one_holes if slice_.plane == PlaneEnum.y]  # if the hole is vertical
 
 # Set 1x1 hole prevention for the horizontal (x, z) planes:
 # A potential hole being active while its neighbours are inactive requires at least one of the sets to be fully
 # active so the original hole can be powered.
 block_specific_horizontal_one_by_one_holes_c = [
-    Implies(And(slices_dict[(plane, a, b)],                            # An active hole on the horizontal plane
-                *[slices_dict[neighbour]                               # that is blocked in by its neighbours
-                  for neighbour in slice_neighbours((plane, a, b))]),  # implies that
+    Implies(And(slice_.sat_bool,                                       # An active hole on the horizontal plane
+                *[neighbour.sat_bool                                   # that is blocked in by its neighbours
+                  for neighbour in slice_.neighbours()]),              # implies that
             Or([And(required_active_group)                             # at least one of the three groups required
                 for required_active_group                              # to power the hole is fully active
-                in potential_holes_to_list_of_sets_of_required_projections[(plane, a, b)]]))
-    for plane, a, b in potential_one_by_one_holes if plane != PlaneEnum.y]
+                in potential_holes_to_list_of_sets_of_required_projections[slice_]]))
+    for slice_ in potential_one_by_one_holes if slice_.plane != PlaneEnum.y]
 
 # Determine the number of clusters that are active and are harvested by any of the slices that are active
 nr_of_harvested_clusters = Int('nr_of_harvested_clusters')
@@ -219,8 +246,8 @@ nr_of_harvested_clusters_c = nr_of_harvested_clusters == Sum(
 
 # Determine the number of slices/projections that are active
 nr_of_projections = Int('nr_of_projections')
-nr_of_projections_c = nr_of_projections == Sum([If(slice_, 1, 0)
-                                                for slice_ in slices_d])
+nr_of_projections_c = nr_of_projections == Sum([If(slice_.sat_bool, 1, 0)
+                                                for slice_ in slices])
 
 score = Int('score')
 score_c = score == nr_of_harvested_clusters  # * 10 + (len(amethyst_clusters) - nr_of_projections)
