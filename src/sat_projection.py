@@ -17,17 +17,40 @@ class PlaneEnum(Enum):
     y = 'Y',
     z = 'Z',
 
-    def to_coord_2d(self, x: int, y: int, z: int) -> tuple[int, int]:
+    def to_coord_2d(self, coord: Coord) -> tuple[int, int]:
         match self:
             case PlaneEnum.x:
-                return y, z
+                return coord.coord_y, coord.coord_z
             case PlaneEnum.y:
-                return x, z
+                return coord.coord_x, coord.coord_z
             case PlaneEnum.z:
-                return x, y
+                return coord.coord_x, coord.coord_y
 
-    def to_slice(self, x: int, y: int, z: int) -> Slice:
-        return Slice(self, *self.to_coord_2d(x, y, z))
+    def to_slice(self, coord: Coord) -> Slice:
+        return Slice(self, *self.to_coord_2d(coord))
+
+
+class Coord:
+    def __init__(self, coord_x: int, coord_y: int, coord_z: int):
+        self.coord_x = coord_x
+        self.coord_y = coord_y
+        self.coord_z = coord_z
+    
+    def add(self, coord_x: int, coord_y: int, coord_z: int) -> Coord:
+        return Coord(self.coord_x + coord_x, self.coord_y + coord_y, self.coord_z + coord_z)
+    
+    def neighbours(self) -> list[Coord]:
+        return [self.add(offset_x, offset_y, offset_z)
+                for offset_x, offset_y, offset_z in [(0, 0, 1), (0, 1, 0), (1, 0, 0),
+                                                     (0, 0, -1), (0, -1, 0), (-1, 0, 0)]]
+
+    def __eq__(self, other):
+        if isinstance(other, Coord):
+            return vars(self) == vars(other)
+        return False
+
+    def __hash__(self):
+        return hash(tuple(vars(self).values()))
 
 
 class Slice:
@@ -39,9 +62,6 @@ class Slice:
 
     def add(self, coord_a: int, coord_b: int) -> Slice:
         return Slice(self.plane, self.coord_a + coord_a, self.coord_b + coord_b)
-
-    def to_slice_coord(self) -> tuple[PlaneEnum, int, int]:
-        return self.plane, self.coord_a, self.coord_b
 
     def to_coord_3d(self, plane_coord: int) -> tuple[int, int, int]:
         match self.plane:
@@ -65,13 +85,6 @@ class Slice:
                 for offset_a, offset_b in [(0, 1), (1, 0), (0, -1), (-1, 0)]]
 
 
-def neighbours_3d(coordinate: tuple[int, int, int]) -> list[tuple[int, int, int]]:
-    x, y, z = coordinate
-    return list((x + offset_x, y + offset_y, z + offset_z)
-                for offset_x, offset_y, offset_z in [(0, 0, 1), (0, 1, 0), (1, 0, 0),
-                                                     (0, 0, -1), (0, -1, 0), (-1, 0, 0)])
-
-
 # Compressed formats describing only the coordinates of the budding amethysts
 geode_compressed: dict[int, list[tuple[int, int]]] = {
     0: [],
@@ -93,15 +106,15 @@ geode_compressed: dict[int, list[tuple[int, int]]] = {
 }
 
 # Decompress list, create buds
-budding_amethysts: set[tuple[int, int, int]] = {(x, y, z)
-                                                for x, val in geode_compressed.items()
-                                                for y, z in val}
+budding_amethysts: set[Coord] = {Coord(x, y, z)
+                                 for x, val in geode_compressed.items()
+                                 for y, z in val}
 # Create clusters
 # NOTE: We intentionally leave in locations that already have buds because the sat solver can
 # choose to enable/disable buds to optimize the total number of projected budding amethysts
-amethyst_clusters = {neighbour_coord
-                     for coord in budding_amethysts
-                     for neighbour_coord in neighbours_3d(coord)}
+amethyst_clusters: set[Coord] = {neighbour_coord
+                                 for coord in budding_amethysts
+                                 for neighbour_coord in coord.neighbours()}
 
 ##################################################
 # Start of building up the SAT solver conditions #
@@ -109,31 +122,31 @@ amethyst_clusters = {neighbour_coord
 
 # Define budding amethysts
 # The bool indicates whether they are active (true) or destroyed (false)
-budding_amethysts_dict: dict[tuple[int, int, int], BoolRef] = {
-    (x, y, z): Bool(f'budding_amethyst__{x}__{y}__{z}')
-    for x, y, z in budding_amethysts}
+budding_amethysts_dict: dict[Coord, BoolRef] = {
+    bud: Bool(f'budding_amethyst__{bud.coord_x}__{bud.coord_y}__{bud.coord_z}')
+    for bud in budding_amethysts}
 budding_amethysts_d: list[BoolRef] = list(budding_amethysts_dict.values())
 
 # Define amethyst crystals
 # The bool indicates whether they are active (true) or destroyed (false)
-amethyst_clusters_dict: dict[tuple[int, int, int], BoolRef] = {
-    (x, y, z): Bool(f'amethyst_cluster__{x}__{y}__{z}')
-    for x, y, z in amethyst_clusters}
+amethyst_clusters_dict: dict[Coord, BoolRef] = {
+    cluster: Bool(f'amethyst_cluster__{cluster.coord_x}__{cluster.coord_y}__{cluster.coord_z}')
+    for cluster in amethyst_clusters}
 amethyst_clusters_d: list[BoolRef] = list(amethyst_clusters_dict.values())
 
 # To make constraints about budding amethysts, amethyst clusters, and slices, we need to create dictionaries first
-slice_coord_to_harvesting_coords_dict: dict[Slice, set[tuple[int, int, int]]] = defaultdict(set)
-harvesting_coords_to_slice_coords_dict: dict[tuple[int, int, int], set[Slice]] = defaultdict(set)
+slice_coord_to_harvesting_coords_dict: dict[Slice, set[Coord]] = defaultdict(set)
+harvesting_coords_to_slice_coords_dict: dict[Coord, set[Slice]] = defaultdict(set)
 for plane in PlaneEnum:
-    for x, y, z in amethyst_clusters | budding_amethysts:
-        slice_ = plane.to_slice(x, y, z)
-        slice_coord_to_harvesting_coords_dict[slice_].add((x, y, z))
-        harvesting_coords_to_slice_coords_dict[(x, y, z)].add(slice_)
+    for coord in amethyst_clusters | budding_amethysts:
+        slice_ = plane.to_slice(coord)
+        slice_coord_to_harvesting_coords_dict[slice_].add(coord)
+        harvesting_coords_to_slice_coords_dict[coord].add(slice_)
 # Define slices
 slices = list(slice_coord_to_harvesting_coords_dict.keys())
-cluster_harvest_dict: dict[tuple[int, int, int], list[BoolRef]] = {
-    coord_3d: [slice_.sat_bool for slice_ in harvesting_coords_to_slice_coords_dict[coord_3d]]
-    for coord_3d in budding_amethysts | amethyst_clusters}
+cluster_harvest_dict: dict[Coord, list[BoolRef]] = {
+    coord: [slice_.sat_bool for slice_ in harvesting_coords_to_slice_coords_dict[coord]]
+    for coord in budding_amethysts | amethyst_clusters}
 
 ########################################################################################################
 # Set relations between amethyst clusters and budding amethysts                                        #
@@ -148,7 +161,7 @@ cluster_harvest_dict: dict[tuple[int, int, int], list[BoolRef]] = {
 cluster_implies_neighbour_bud_c = [
     Implies(amethyst_clusters_dict[amethyst_coords],                      # Amethyst coords imply that
             Or([budding_amethysts_dict[possible_bud_coord]                # One or more neighbouring buds are true
-                for possible_bud_coord in neighbours_3d(amethyst_coords)  #
+                for possible_bud_coord in amethyst_coords.neighbours()    #
                 if possible_bud_coord in budding_amethysts_dict]))        # We exclude buds coords that don't exist
     for amethyst_coords in amethyst_clusters]
 
@@ -160,12 +173,12 @@ bud_implies_possible_neighbour_cluster_c = [
                     amethyst_clusters_dict[neighbour_coord])         # the coord either has a bud or a crystal,
                  if neighbour_coord in budding_amethysts_dict        #
                  else amethyst_clusters_dict[neighbour_coord]        # otherwise, it has a crystal
-                 for neighbour_coord in neighbours_3d(bud_coord)]))  #
+                 for neighbour_coord in bud_coord.neighbours()]))    #
     for bud_coord in budding_amethysts]
 
 # Relation 3: Budding Amethyst xor Amethyst Cluster
 bud_xor_cluster_c = [Xor(budding_amethysts_dict[coord], amethyst_clusters_dict[coord])
-                     for coord in amethyst_clusters_dict.keys() & budding_amethysts_dict.keys()]
+                     for coord in amethyst_clusters & budding_amethysts]
 
 ###############################################################################################
 # Set projection relations
@@ -179,14 +192,14 @@ bud_xor_cluster_c = [Xor(budding_amethysts_dict[coord], amethyst_clusters_dict[c
 # Set relations between slices and budding amethysts:
 # When a slice is active, the budding amethysts that intersect with it are inactive
 slice_implies_not_bud_c = [
-    Implies(slice_.sat_bool, Not(budding_amethysts_dict[coord_3d]))
-    for coord_3d, slices in harvesting_coords_to_slice_coords_dict.items() if coord_3d in budding_amethysts
+    Implies(slice_.sat_bool, Not(budding_amethysts_dict[coord]))
+    for coord, slices in harvesting_coords_to_slice_coords_dict.items() if coord in budding_amethysts
     for slice_ in slices]
 
 # When a budding amethyst is active, no slice that could harvest it is active
 bud_implies_not_slices_c = [
-    Implies(budding_amethysts_dict[coord_3d], Not(slice_.sat_bool))
-    for coord_3d, slices in harvesting_coords_to_slice_coords_dict.items() if coord_3d in budding_amethysts
+    Implies(budding_amethysts_dict[coord], Not(slice_.sat_bool))
+    for coord, slices in harvesting_coords_to_slice_coords_dict.items() if coord in budding_amethysts
     for slice_ in slices]
 
 # Build up required structures for relations between 1x1 holes:
@@ -240,9 +253,9 @@ block_specific_horizontal_one_by_one_holes_c = [
 nr_of_harvested_clusters = Int('nr_of_harvested_clusters')
 nr_of_harvested_clusters_c = nr_of_harvested_clusters == Sum(
     [If(And(cluster,                                                  # If the cluster is active
-            Or(cluster_harvest_dict[cluster_coords])),                # and one of the slices harvests it,
+            Or(cluster_harvest_dict[coord])),                         # and one of the slices harvests it,
         1, 0)                                                         # then count the cluster as 1, otherwise as 0
-     for cluster_coords, cluster in amethyst_clusters_dict.items()])  #
+     for coord, cluster in amethyst_clusters_dict.items()])           #
 
 # Determine the number of slices/projections that are active
 nr_of_projections = Int('nr_of_projections')
