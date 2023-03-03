@@ -182,42 +182,57 @@ bud_xor_cluster_c = [Xor(budding_amethysts_dict[coord], amethyst_clusters_dict[c
 
 ###############################################################################################
 # Set projection relations
-# We have four relations to define:
-# Relation 1: Active slices lead to inactive budding amethysts
-# Relation 2: Active buds lead to inactive slices
-# Relation 3: 1x1 holes in the vertical (y) axis cannot exist.
-# Relation 4: 1x1 holes in the horizontal (x, z) axes can exist in specific scenarios
+# We have three relations to define:
+# Relation 1: For all buds a slice would clear, the slice is active xor the bud is active
+# Relation 2: 1x1 holes in the vertical (y) plane cannot exist
+# Relation 3: 1x1 holes in the horizontal (x, z) planes can exist in specific scenarios
 ###############################################################################################
 
-# Set relations between slices and budding amethysts:
-# When a slice is active, the budding amethysts that intersect with it are inactive
-slice_implies_not_bud_c = [
-    Implies(slice_.sat_bool, Not(budding_amethysts_dict[coord]))
+# Set relation 1: For all buds a slice would clear, the slice is active xor the bud is active
+# NOTE: Technically, this condition limits the completeness of the problem.
+# If a slice covers two buds, and removing only one of those buds could lead to improved
+# cluster coverage (through one of the other two slices), then that scenario cannot be detected.
+# The condition xor(slice, or(all buds that the slice clears)) would be the constraint that
+# could replace the current constraint with perfect soundness and completeness, but in practice,
+# it performs much worse.
+# With the complete constraint, getting to ~345 harvested clusters can already take minutes,
+# whereas with the incomplete constraint, getting to 360 (with 361 being unsat) takes 5 seconds.
+# While that leaves no guarantee that 360 is truly the limit, it's much more practical for
+# the purposes of quickly getting a (very) optimal projection.
+bud_xor_slices_c = [
+    Xor(budding_amethysts_dict[coord], slice_.sat_bool)
     for coord, slices in harvesting_coords_to_slice_coords_dict.items() if coord in budding_amethysts
     for slice_ in slices]
 
-# When a budding amethyst is active, no slice that could harvest it is active
-bud_implies_not_slices_c = [
-    Implies(budding_amethysts_dict[coord], Not(slice_.sat_bool))
-    for coord, slices in harvesting_coords_to_slice_coords_dict.items() if coord in budding_amethysts
-    for slice_ in slices]
-
-# Build up required structures for relations between 1x1 holes:
-# Identify projections that could be 1x1 holes
+# For relations 2 and 3, we need to identify potential 1x1 holes first:
 potential_one_by_one_holes: set[Slice] = {
     slice_
     for slice_ in slices
     if all(neighbour in slices 
            for neighbour in slice_.neighbours())}
 
-# Map the holes to a set of up to three projections that must be active to make it possible to power it
+# Set relation 2: 1x1 holes in the vertical (y) plane cannot exist:
+# Written as:
+# If a potential hole in the y plane is active,
+# then at least one of its neighbours must be active too, so it is not a 1x1 hole.
+block_vertical_one_by_one_holes_c = [
+    Implies(slice_.sat_bool,                                                  # A potential hole implies
+            Or([neighbour.sat_bool                                            # that at least one neighbour
+                for neighbour in slice_.neighbours()]))                       # is active
+    for slice_ in potential_one_by_one_holes if slice_.plane == PlaneEnum.y]  # if the hole is vertical
+
+
+# For relation 3, we must first create a map from each potential hole to a list of up to three sets of
+# projections in a specific shape.
+# If slices can be placed for all positions in at least one of those sets, the potential hole could be
+# harvested even if it is a 1x1 hole.
 # The following holes allow for the projection to be active
 #     B
 #     B
 #   AA#CC
 #    #H#
 #     #
-# Where # is blocked, H is the hole, and A, B, or C has to be free
+# Where # is blocked, H is the hole, and all A's, B's, or C's have to be free
 potential_holes_to_list_of_sets_of_required_projections: dict[Slice, list[set[BoolRef]]] = {}
 for slice_ in potential_one_by_one_holes:
     if slice_.plane == PlaneEnum.y:
@@ -228,21 +243,16 @@ for slice_ in potential_one_by_one_holes:
           if (offset_slice := slice_.add(offset_a, offset_b)) in slices}
          for offset_coords in [{(-2, 1), (-1, 1)}, {(0, 2), (0, 3)}, {(1, 1), (1, 2)}]]
 
-# Set 1x1 hole prevention for the vertical (y) plane:
-# A potential hole being active implies that at least one of its neighbours is also active,
-# because then it's not a 1x1 hole but at least 2x1.
-block_vertical_one_by_one_holes_c = [
-    Implies(slice_.sat_bool,                                                  # A potential hole implies
-            Or([neighbour.sat_bool                                            # that at least one neighbour
-                for neighbour in slice_.neighbours()]))                       # is active
-    for slice_ in potential_one_by_one_holes if slice_.plane == PlaneEnum.y]  # if the hole is vertical
-
-# Set 1x1 hole prevention for the horizontal (x, z) planes:
-# A potential hole being active while its neighbours are inactive requires at least one of the sets to be fully
+# Set relation 3: 1x1 holes in the horizontal (x, z) planes can exist in specific scenarios
+# Written as:
+# A potential hole being active while its neighbours are inactive, which is therefore a 1x1 hole,
+# requires at least one of the sets to be fully
 # active so the original hole can be powered.
+# NOTE: It is intended for sets to sometimes be empty. It will just lead to an empty `and()`,
+#       which is equivalent to `true` and therefore does not pose a problem.
 block_specific_horizontal_one_by_one_holes_c = [
     Implies(And(slice_.sat_bool,                                       # An active hole on the horizontal plane
-                *[neighbour.sat_bool                                   # that is blocked in by its neighbours
+                *[Not(neighbour.sat_bool)                              # that is blocked in by its neighbours
                   for neighbour in slice_.neighbours()]),              # implies that
             Or([And(required_active_group)                             # at least one of the three groups required
                 for required_active_group                              # to power the hole is fully active
@@ -269,25 +279,38 @@ s = Solver()
 s.append(cluster_implies_neighbour_bud_c)
 s.append(bud_implies_possible_neighbour_cluster_c)
 s.append(bud_xor_cluster_c)
-s.append(slice_implies_not_bud_c)
-s.append(bud_implies_not_slices_c)
+s.append(bud_xor_slices_c)
 s.append(block_vertical_one_by_one_holes_c)
 s.append(block_specific_horizontal_one_by_one_holes_c)
 s.append(nr_of_harvested_clusters_c)
 s.append(nr_of_projections_c)
 s.append(score_c)
 
-minimum_score = 300
+minimum_harvested_clusters = 330
 while True:
-    s.check(minimum_score <= score)
+    s.check(minimum_harvested_clusters <= nr_of_harvested_clusters)
     try:
         model = s.model()
     except Z3Exception:
         break
-    print(f'Score: {model[score]}')
     print(f'nr_of_harvested_clusters: {model[nr_of_harvested_clusters]}')
     print(f'nr_of_projections: {model[nr_of_projections]}')
-    if int(str(model[score])) > minimum_score:
-        minimum_score = int(str(model[score]))
+    if int(str(model[nr_of_harvested_clusters])) > minimum_harvested_clusters:
+        minimum_harvested_clusters = int(str(model[nr_of_harvested_clusters]))
 
-    minimum_score += 1
+    minimum_harvested_clusters += 1
+minimum_harvested_clusters -= 1
+s.add(minimum_harvested_clusters <= nr_of_harvested_clusters)
+maximum_projections = int(str(model[nr_of_projections]))
+while True:
+    s.check(maximum_projections >= nr_of_projections)
+    try:
+        model = s.model()
+    except Z3Exception:
+        break
+    print(f'nr_of_harvested_clusters: {model[nr_of_harvested_clusters]}')
+    print(f'nr_of_projections: {model[nr_of_projections]}')
+    if int(str(model[nr_of_projections])) < maximum_projections:
+        maximum_projections = int(str(model[nr_of_projections]))
+
+    maximum_projections -= 1
